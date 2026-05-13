@@ -1,0 +1,175 @@
+---
+# Grafana alert rules following the Google SRE workbook multi-window
+# multi-burn-rate pattern.
+#
+# Fast-burn alert: budget would be exhausted in <2 days. Page immediately.
+#   Triggers when burn rate > 14.4 over 1h AND > 14.4 over 5m
+#
+# Slow-burn alert: budget would be exhausted in <10 days. Ticket.
+#   Triggers when burn rate > 6 over 6h AND > 6 over 30m
+#
+# Using two windows guards against false positives (one window noisy) and
+# false negatives (steady degradation never crossing the long-window threshold).
+
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: SLO Burn Rate Alerts
+    folder: SLO
+    interval: 1m
+    rules:
+      # ──────────────────────────────────────────────────────────────────────
+      # Availability SLO — fast burn
+      # ──────────────────────────────────────────────────────────────────────
+      - uid: availability-fast-burn
+        title: "Availability: fast budget burn"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: slo:availability:burn_rate1h
+              instant: true
+          - refId: B
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: B
+              expr: slo:availability:burn_rate5m
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 14.4 && $B > 14.4"
+        noDataState: OK
+        execErrState: OK
+        for: 2m
+        annotations:
+          summary: "Availability budget burning fast (>14.4× over 1h)"
+          description: "At this burn rate the 30-day SLO budget will be exhausted in under 2 days. Investigate immediately."
+          runbook_url: "https://github.com/your-org/observability-demo/blob/main/docs/runbooks/slo-fast-burn.md"
+        labels:
+          severity: page
+          slo: availability
+
+      # ──────────────────────────────────────────────────────────────────────
+      # Availability SLO — slow burn
+      # ──────────────────────────────────────────────────────────────────────
+      - uid: availability-slow-burn
+        title: "Availability: slow budget burn"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 21600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: slo:availability:burn_rate6h
+              instant: true
+          - refId: B
+            relativeTimeRange: { from: 1800, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: B
+              expr: slo:availability:burn_rate30m
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 6 && $B > 6"
+        noDataState: OK
+        execErrState: OK
+        for: 15m
+        annotations:
+          summary: "Availability budget burning steadily (>6× over 6h)"
+          description: "Persistent degradation. Budget will be exhausted in under 10 days at this rate."
+          runbook_url: "https://github.com/your-org/observability-demo/blob/main/docs/runbooks/slo-slow-burn.md"
+        labels:
+          severity: ticket
+          slo: availability
+
+      # ──────────────────────────────────────────────────────────────────────
+      # Latency SLO — fast burn
+      # ──────────────────────────────────────────────────────────────────────
+      - uid: latency-fast-burn
+        title: "Latency: fast budget burn"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: slo:latency:burn_rate1h
+              instant: true
+          - refId: B
+            relativeTimeRange: { from: 600, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: B
+              expr: slo:latency:burn_rate5m
+              instant: true
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              refId: C
+              type: math
+              expression: "$A > 14.4 && $B > 14.4"
+        noDataState: OK
+        execErrState: OK
+        for: 2m
+        annotations:
+          summary: "Latency budget burning fast — too many requests over 500ms"
+          description: "More than 14.4× the allowed share of /order requests are exceeding the 500ms target. p99 is likely well above 500ms."
+          runbook_url: "https://github.com/your-org/observability-demo/blob/main/docs/runbooks/latency-degradation.md"
+        labels:
+          severity: page
+          slo: latency
+
+      # ──────────────────────────────────────────────────────────────────────
+      # High error rate (classic, complements the SLO burn alerts)
+      # ──────────────────────────────────────────────────────────────────────
+      - uid: high-error-rate
+        title: "High error rate"
+        condition: B
+        data:
+          - refId: A
+            relativeTimeRange: { from: 300, to: 0 }
+            datasourceUid: prometheus
+            model:
+              refId: A
+              expr: |
+                100 * sum(rate(http_requests_total{http_response_status_code=~"5.."}[5m]))
+                /
+                sum(rate(http_requests_total[5m]))
+              instant: true
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              refId: B
+              type: threshold
+              expression: ""
+              conditions:
+                - evaluator:
+                    type: gt
+                    params: [5]
+                  operator: { type: and }
+                  query: { params: [A] }
+                  reducer: { type: last }
+                  type: query
+        noDataState: OK
+        execErrState: OK
+        for: 5m
+        annotations:
+          summary: "Error rate is above 5% for 5 minutes"
+          description: "{{ $values.A }}% of requests are failing. Check the latest deploy and downstream health."
+          runbook_url: "https://github.com/your-org/observability-demo/blob/main/docs/runbooks/error-rate-high.md"
+        labels:
+          severity: page

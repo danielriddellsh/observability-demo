@@ -1,0 +1,130 @@
+---
+# Recording rules for SLO calculation following the Google SRE workbook
+# multi-window multi-burn-rate pattern.
+#
+# Two SLOs:
+#   1. Availability: 99% of /order requests return non-5xx
+#   2. Latency:      99% of /order requests complete in <500ms
+#
+# For each SLO we compute the SLI over multiple windows (5m, 30m, 1h, 6h, 30d)
+# so the burn-rate alerts can fire fast on real outages and slow on grinding
+# regressions.
+
+groups:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Availability SLI — fraction of /order requests that are NOT 5xx.
+  # ──────────────────────────────────────────────────────────────────────────
+  - name: slo_availability
+    interval: 30s
+    rules:
+      - record: slo:availability:ratio_rate5m
+        expr: |
+          sum(rate(http_requests_total{http_route="/order", http_response_status_code!~"5.."}[5m]))
+          /
+          sum(rate(http_requests_total{http_route="/order"}[5m]))
+
+      - record: slo:availability:ratio_rate30m
+        expr: |
+          sum(rate(http_requests_total{http_route="/order", http_response_status_code!~"5.."}[30m]))
+          /
+          sum(rate(http_requests_total{http_route="/order"}[30m]))
+
+      - record: slo:availability:ratio_rate1h
+        expr: |
+          sum(rate(http_requests_total{http_route="/order", http_response_status_code!~"5.."}[1h]))
+          /
+          sum(rate(http_requests_total{http_route="/order"}[1h]))
+
+      - record: slo:availability:ratio_rate6h
+        expr: |
+          sum(rate(http_requests_total{http_route="/order", http_response_status_code!~"5.."}[6h]))
+          /
+          sum(rate(http_requests_total{http_route="/order"}[6h]))
+
+      - record: slo:availability:ratio_rate30d
+        expr: |
+          sum(rate(http_requests_total{http_route="/order", http_response_status_code!~"5.."}[30d]))
+          /
+          sum(rate(http_requests_total{http_route="/order"}[30d]))
+
+      # Burn rate = (1 - SLI) / (1 - target). >1 means budget is being burned
+      # faster than allowed; the SLO target is 99% so the allowed error rate is 1%.
+      - record: slo:availability:burn_rate5m
+        expr: (1 - slo:availability:ratio_rate5m) / (1 - 0.99)
+
+      - record: slo:availability:burn_rate30m
+        expr: (1 - slo:availability:ratio_rate30m) / (1 - 0.99)
+
+      - record: slo:availability:burn_rate1h
+        expr: (1 - slo:availability:ratio_rate1h) / (1 - 0.99)
+
+      - record: slo:availability:burn_rate6h
+        expr: (1 - slo:availability:ratio_rate6h) / (1 - 0.99)
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Latency SLI — fraction of /order requests completing in <500ms.
+  # ──────────────────────────────────────────────────────────────────────────
+  - name: slo_latency
+    interval: 30s
+    rules:
+      - record: slo:latency:ratio_rate5m
+        expr: |
+          sum(rate(http_request_duration_seconds_bucket{http_route="/order", le="0.5"}[5m]))
+          /
+          sum(rate(http_request_duration_seconds_count{http_route="/order"}[5m]))
+
+      - record: slo:latency:ratio_rate30m
+        expr: |
+          sum(rate(http_request_duration_seconds_bucket{http_route="/order", le="0.5"}[30m]))
+          /
+          sum(rate(http_request_duration_seconds_count{http_route="/order"}[30m]))
+
+      - record: slo:latency:ratio_rate1h
+        expr: |
+          sum(rate(http_request_duration_seconds_bucket{http_route="/order", le="0.5"}[1h]))
+          /
+          sum(rate(http_request_duration_seconds_count{http_route="/order"}[1h]))
+
+      - record: slo:latency:ratio_rate6h
+        expr: |
+          sum(rate(http_request_duration_seconds_bucket{http_route="/order", le="0.5"}[6h]))
+          /
+          sum(rate(http_request_duration_seconds_count{http_route="/order"}[6h]))
+
+      - record: slo:latency:ratio_rate30d
+        expr: |
+          sum(rate(http_request_duration_seconds_bucket{http_route="/order", le="0.5"}[30d]))
+          /
+          sum(rate(http_request_duration_seconds_count{http_route="/order"}[30d]))
+
+      - record: slo:latency:burn_rate5m
+        expr: (1 - slo:latency:ratio_rate5m) / (1 - 0.99)
+
+      - record: slo:latency:burn_rate30m
+        expr: (1 - slo:latency:ratio_rate30m) / (1 - 0.99)
+
+      - record: slo:latency:burn_rate1h
+        expr: (1 - slo:latency:ratio_rate1h) / (1 - 0.99)
+
+      - record: slo:latency:burn_rate6h
+        expr: (1 - slo:latency:ratio_rate6h) / (1 - 0.99)
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Generic dashboarding helpers.
+  # ──────────────────────────────────────────────────────────────────────────
+  - name: http_dashboards
+    interval: 30s
+    rules:
+      - record: http:request_duration_seconds:p99_5m
+        expr: |
+          histogram_quantile(0.99,
+            sum by (le, http_route, service_name) (
+              rate(http_request_duration_seconds_bucket[5m])
+            )
+          )
+
+      - record: http:errors:rate5m
+        expr: |
+          sum by (http_route, service_name) (
+            rate(http_requests_total{http_response_status_code=~"5.."}[5m])
+          )
