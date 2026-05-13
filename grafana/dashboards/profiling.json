@@ -1,0 +1,53 @@
+{
+  "title": "Profiling — Worker Flamegraph",
+  "uid": "profiling",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "time": { "from": "now-15m", "to": "now" },
+  "tags": ["profiling", "observability-demo"],
+  "annotations": {
+    "list": [
+      {
+        "name": "Deploys",
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "iconColor": "rgba(255, 96, 96, 1)",
+        "enable": true,
+        "matchAny": true,
+        "tags": ["deploy"],
+        "type": "tags"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Worker CPU — flamegraph",
+      "type": "flamegraph",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 16 },
+      "datasource": { "type": "grafana-pyroscope-datasource", "uid": "pyroscope" },
+      "targets": [
+        {
+          "refId": "A",
+          "labelSelector": "{service_name=\"worker\"}",
+          "profileTypeId": "process_cpu:cpu:nanoseconds:cpu:nanoseconds",
+          "groupBy": []
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Worker — memory allocations",
+      "type": "flamegraph",
+      "gridPos": { "x": 0, "y": 16, "w": 24, "h": 12 },
+      "datasource": { "type": "grafana-pyroscope-datasource", "uid": "pyroscope" },
+      "targets": [
+        {
+          "refId": "A",
+          "labelSelector": "{service_name=\"worker\"}",
+          "profileTypeId": "memory:alloc_space:bytes:space:bytes",
+          "groupBy": []
+        }
+      ]
+    }
+  ]
+}

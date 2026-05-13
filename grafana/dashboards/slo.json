@@ -1,0 +1,294 @@
+{
+  "title": "SLOs — Service Level Objectives",
+  "uid": "slo",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-30m", "to": "now" },
+  "tags": ["slo", "observability-demo"],
+  "annotations": {
+    "list": [
+      {
+        "name": "Deploys",
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "iconColor": "rgba(255, 96, 96, 1)",
+        "enable": true,
+        "matchAny": true,
+        "tags": ["deploy"],
+        "type": "tags"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 100,
+      "type": "row",
+      "title": "Availability SLO — target 99%",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 }
+    },
+    {
+      "id": 1,
+      "title": "Current SLI (30d)",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 1, "w": 6, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "slo:availability:ratio_rate30d * 100", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 99 },
+              { "color": "green", "value": 99.9 }
+            ]
+          }
+        }
+      },
+      "options": { "colorMode": "value", "graphMode": "none", "textMode": "value" }
+    },
+    {
+      "id": 2,
+      "title": "Error Budget Remaining",
+      "type": "stat",
+      "gridPos": { "x": 6, "y": 1, "w": 6, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "100 * (1 - ((1 - slo:availability:ratio_rate30d) / (1 - 0.99)))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 25 },
+              { "color": "green", "value": 75 }
+            ]
+          }
+        }
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "textMode": "value_and_name" }
+    },
+    {
+      "id": 3,
+      "title": "Burn Rate (1h)",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 1, "w": 6, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "slo:availability:burn_rate1h", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 6 }
+            ]
+          }
+        }
+      },
+      "options": { "colorMode": "value", "graphMode": "area", "textMode": "value_and_name" }
+    },
+    {
+      "id": 4,
+      "title": "Burn Rate (6h)",
+      "type": "stat",
+      "gridPos": { "x": 18, "y": 1, "w": 6, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "slo:availability:burn_rate6h", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 3 }
+            ]
+          }
+        }
+      },
+      "options": { "colorMode": "value", "graphMode": "area", "textMode": "value_and_name" }
+    },
+    {
+      "id": 5,
+      "title": "Availability SLI over time (5m window)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 6, "w": 24, "h": 7 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "slo:availability:ratio_rate5m * 100", "legendFormat": "Availability %", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": { "lineWidth": 2, "fillOpacity": 10 },
+          "min": 90,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 99 }
+            ]
+          },
+          "custom.thresholdsStyle": { "mode": "line" }
+        }
+      }
+    },
+    {
+      "id": 200,
+      "type": "row",
+      "title": "Latency SLO — target 99% of /order requests under 500ms",
+      "gridPos": { "x": 0, "y": 13, "w": 24, "h": 1 }
+    },
+    {
+      "id": 6,
+      "title": "Current SLI (30d)",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 14, "w": 6, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "slo:latency:ratio_rate30d * 100", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 3,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 99 },
+              { "color": "green", "value": 99.9 }
+            ]
+          }
+        }
+      },
+      "options": { "colorMode": "value", "graphMode": "none", "textMode": "value" }
+    },
+    {
+      "id": 7,
+      "title": "Error Budget Remaining",
+      "type": "stat",
+      "gridPos": { "x": 6, "y": 14, "w": 6, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "expr": "100 * (1 - ((1 - slo:latency:ratio_rate30d) / (1 - 0.99)))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "orange", "value": 25 },
+              { "color": "green", "value": 75 }
+            ]
+          }
+        }
+      },
+      "options": { "colorMode": "background", "graphMode": "none", "textMode": "value_and_name" }
+    },
+    {
+      "id": 8,
+      "title": "Burn Rate (1h)",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 14, "w": 6, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "slo:latency:burn_rate1h", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 6 }
+            ]
+          }
+        }
+      },
+      "options": { "colorMode": "value", "graphMode": "area", "textMode": "value_and_name" }
+    },
+    {
+      "id": 9,
+      "title": "Burn Rate (6h)",
+      "type": "stat",
+      "gridPos": { "x": 18, "y": 14, "w": 6, "h": 5 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "slo:latency:burn_rate6h", "refId": "A" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 3 }
+            ]
+          }
+        }
+      },
+      "options": { "colorMode": "value", "graphMode": "area", "textMode": "value_and_name" }
+    },
+    {
+      "id": 10,
+      "title": "Latency burn rate over time — 1h vs 6h windows",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 19, "w": 24, "h": 8 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        { "expr": "slo:latency:burn_rate5m", "legendFormat": "5m burn", "refId": "A" },
+        { "expr": "slo:latency:burn_rate1h", "legendFormat": "1h burn", "refId": "B" },
+        { "expr": "slo:latency:burn_rate6h", "legendFormat": "6h burn", "refId": "C" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": { "lineWidth": 2, "fillOpacity": 5 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "orange", "value": 1 },
+              { "color": "red", "value": 14.4 }
+            ]
+          },
+          "custom.thresholdsStyle": { "mode": "dashed" }
+        }
+      }
+    }
+  ]
+}
