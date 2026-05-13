@@ -20,15 +20,14 @@ datasources:
     editable: true
     jsonData:
       tracesToLogsV2:
-        customQuery: true
         datasourceUid: loki
-        # |= is a line-contains filter — works whether trace_id is a label or JSON body field
-        query: '{${__tags}} |= "${__trace.traceId}"'
+        filterByTraceID: true
+        filterBySpanID: false
         tags:
           - key: service.name
             value: service_name
-        spanStartTimeShift: '-1m'
-        spanEndTimeShift: '1m'
+        spanStartTimeShift: '-2m'
+        spanEndTimeShift: '2m'
       serviceMap:
         datasourceUid: prometheus
       search:
