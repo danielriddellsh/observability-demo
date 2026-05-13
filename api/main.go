@@ -233,7 +233,13 @@ func orderHandler(w http.ResponseWriter, r *http.Request) {
 
 func setupOTel(ctx context.Context) (func(context.Context) error, error) {
 	res, err := resource.New(ctx,
-		resource.WithAttributes(semconv.ServiceName(getenv("OTEL_SERVICE_NAME", serviceName))),
+		resource.WithAttributes(
+			semconv.ServiceName(getenv("OTEL_SERVICE_NAME", serviceName)),
+			semconv.ServiceVersion(getenv("SERVICE_VERSION", "v1.4.2")),
+			semconv.DeploymentEnvironment(getenv("DEPLOYMENT_ENV", "production")),
+			attribute.String("cloud.region", getenv("CLOUD_REGION", "eu-west-1")),
+			attribute.String("k8s.cluster.name", getenv("K8S_CLUSTER", "prod-eu-1")),
+		),
 		resource.WithFromEnv(),
 		resource.WithProcess(),
 		resource.WithHost(),
@@ -270,9 +276,21 @@ func setupOTel(ctx context.Context) (func(context.Context) error, error) {
 	if err != nil {
 		return nil, fmt.Errorf("metric exporter: %w", err)
 	}
+	// Override the default histogram buckets — the SDK's defaults assume
+	// milliseconds (0..10000) but we record in seconds, which would put
+	// every observation in the le=0 bucket.
+	latencyView := sdkmetric.NewView(
+		sdkmetric.Instrument{Name: "http_request_duration_seconds"},
+		sdkmetric.Stream{
+			Aggregation: sdkmetric.AggregationExplicitBucketHistogram{
+				Boundaries: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+			},
+		},
+	)
 	mp := sdkmetric.NewMeterProvider(
 		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExp, sdkmetric.WithInterval(10*time.Second))),
 		sdkmetric.WithResource(res),
+		sdkmetric.WithView(latencyView),
 	)
 	otel.SetMeterProvider(mp)
 

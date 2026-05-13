@@ -15,6 +15,7 @@ import (
 
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -121,7 +122,12 @@ func hit(ctx context.Context, client *http.Client, url string) {
 
 func setupTracing(ctx context.Context) (func(context.Context) error, error) {
 	res, err := resource.New(ctx,
-		resource.WithAttributes(semconv.ServiceName(getenv("OTEL_SERVICE_NAME", serviceName))),
+		resource.WithAttributes(
+			semconv.ServiceName(getenv("OTEL_SERVICE_NAME", serviceName)),
+			semconv.ServiceVersion(getenv("SERVICE_VERSION", "v1.4.2")),
+			semconv.DeploymentEnvironment(getenv("DEPLOYMENT_ENV", "production")),
+			attribute.String("cloud.region", getenv("CLOUD_REGION", "eu-west-1")),
+		),
 		resource.WithFromEnv(),
 		resource.WithProcess(),
 	)
