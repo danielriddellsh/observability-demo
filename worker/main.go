@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,7 +13,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/grafana/pyroscope-go"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
@@ -42,7 +40,6 @@ var (
 	dbErrors    metric.Int64Counter
 	cacheOps    metric.Int64Counter
 	activeCalls atomic.Int32 // in-flight /process requests
-	chaosMode   atomic.Bool  // toggled via /admin/chaos endpoint; injects extra latency + errors
 )
 
 type traceContextHandler struct{ slog.Handler }
@@ -99,29 +96,6 @@ func main() {
 	}
 	defer shutdown(context.Background())
 
-	// Continuous profiling — sends CPU/memory profiles to Pyroscope (port 4040 in otel-lgtm).
-	profiler, err := pyroscope.Start(pyroscope.Config{
-		ApplicationName: serviceName,
-		ServerAddress:   getenv("PYROSCOPE_URL", "http://otel-lgtm:4040"),
-		Tags: map[string]string{
-			"region":      getenv("CLOUD_REGION", "eu-west-1"),
-			"environment": getenv("DEPLOYMENT_ENV", "production"),
-			"version":     getenv("SERVICE_VERSION", "v1.4.2"),
-		},
-		ProfileTypes: []pyroscope.ProfileType{
-			pyroscope.ProfileCPU,
-			pyroscope.ProfileAllocObjects,
-			pyroscope.ProfileAllocSpace,
-			pyroscope.ProfileInuseObjects,
-			pyroscope.ProfileInuseSpace,
-		},
-	})
-	if err != nil {
-		slog.Warn("pyroscope start failed (continuing without profiling)", "err", err)
-	} else {
-		defer profiler.Stop()
-	}
-
 	otlpHandler := otelslog.NewHandler(serviceName)
 	stdoutHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
 	logger := slog.New(traceContextHandler{fanoutHandler{otlpHandler, stdoutHandler}})
@@ -132,13 +106,6 @@ func main() {
 		fmt.Fprintln(w, "ok")
 	})
 	mux.HandleFunc("GET /process", processHandler)
-	// Chaos toggle used by `just break` / `just fix` to simulate a bad deploy.
-	mux.HandleFunc("POST /admin/chaos", func(w http.ResponseWriter, r *http.Request) {
-		on := r.URL.Query().Get("on") == "true"
-		chaosMode.Store(on)
-		slog.WarnContext(r.Context(), "chaos mode toggled", "enabled", on)
-		fmt.Fprintf(w, `{"chaos":%v}`, on)
-	})
 
 	handler := otelhttp.NewHandler(mux, "http.server",
 		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
@@ -239,14 +206,11 @@ func cacheCheck(ctx context.Context, orderID string) error {
 // dbLookup simulates a real-world database call whose behaviour degrades
 // under load — mirroring queuing theory (Little's Law):
 //
-//   - Base rates: ~98% fast, ~1.5% slow query, ~0.5% error (within a 99% SLO)
+//   - Base rates: ~98% fast, ~1.5% slow query, ~0.5% error
 //   - Each extra concurrent request above 3 adds ~40 ms of queuing latency
-//     and pushes the slow/error probability up
-//   - When chaos mode is on (toggled via /admin/chaos), baseline errors jump
-//     to ~25% and an extra 300 ms of latency is added — simulating a bad deploy.
+//     and pushes the slow/error probability up (connection pool pressure)
 func dbLookup(ctx context.Context, orderID, userID string) error {
 	concurrency := int(activeCalls.Load())
-	chaos := chaosMode.Load()
 
 	ctx, span := tracer.Start(ctx, "db.lookup",
 		trace.WithAttributes(
@@ -256,7 +220,6 @@ func dbLookup(ctx context.Context, orderID, userID string) error {
 			attribute.String("order.id", orderID),
 			attribute.String("user.id", userID),
 			attribute.Int("db.concurrency", concurrency),
-			attribute.Bool("chaos.enabled", chaos),
 		),
 	)
 	defer span.End()
@@ -267,17 +230,9 @@ func dbLookup(ctx context.Context, orderID, userID string) error {
 	queueDepth := max(0, concurrency-3)
 	queueLatency := time.Duration(queueDepth*40) * time.Millisecond
 
-	// Baseline probabilities stay well inside a 99% SLO budget.
-	// Load-correlated escalation pushes them up under pressure.
+	// Load-correlated escalation pushes baseline slow/error rates up under pressure.
 	errorProb := 0.005 + float64(queueDepth)*0.015
 	slowProb := 0.015 + float64(queueDepth)*0.02
-
-	// Chaos amplifies everything to simulate a bad deploy.
-	if chaos {
-		errorProb += 0.25
-		slowProb += 0.20
-		queueLatency += 300 * time.Millisecond
-	}
 
 	r := rand.Float64()
 	var err error
@@ -328,36 +283,7 @@ func compute(ctx context.Context, orderID string) error {
 	)
 	defer span.End()
 	time.Sleep(time.Duration(5+rand.Intn(15)) * time.Millisecond)
-
-	// When chaos mode is on, this branch dominates the worker CPU flamegraph
-	// in Pyroscope — a real-world example of "a bad release shipped a hot
-	// loop into a previously cheap function."
-	if chaosMode.Load() {
-		expensiveMarshalLoop(orderID)
-	}
 	return nil
-}
-
-// expensiveMarshalLoop simulates a regression introduced by a bad deploy:
-// repeatedly serialising a payload that should have been cached. Designed
-// to be visible as a dominant frame in the Pyroscope CPU flamegraph.
-func expensiveMarshalLoop(orderID string) {
-	payload := map[string]any{
-		"order_id": orderID,
-		"items":    make([]map[string]any, 50),
-	}
-	for i := range 50 {
-		payload["items"].([]map[string]any)[i] = map[string]any{
-			"sku":   fmt.Sprintf("SKU-%05d", i),
-			"qty":   rand.Intn(10),
-			"price": rand.Float64() * 100,
-		}
-	}
-	// 2000 marshal calls per request — clearly visible on a flamegraph
-	// without making the trace noticeably slower than the chaos latency hit.
-	for range 2000 {
-		_, _ = json.Marshal(payload)
-	}
 }
 
 func setupOTel(ctx context.Context) (func(context.Context) error, error) {

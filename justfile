@@ -16,9 +16,9 @@ down:
 rebuild:
     docker-compose up --build -d
 
-# Open the Observability Demo dashboard in your browser.
+# Open the Overview dashboard.
 open:
-    open "http://localhost:3000/d/obs-demo/observability-demo"
+    open "http://localhost:3000/d/obs-demo/overview-observability-demo"
 
 # Open Grafana Explore for traces, logs, or metrics.
 explore-traces:

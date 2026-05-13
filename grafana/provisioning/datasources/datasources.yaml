@@ -56,3 +56,5 @@ datasources:
     type: grafana-pyroscope-datasource
     uid: pyroscope
     url: http://127.0.0.1:4040
+    jsonData:
+      backendType: pyroscope

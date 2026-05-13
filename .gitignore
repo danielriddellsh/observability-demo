@@ -1,3 +1,4 @@
 api/api
 loadgen/loadgen
 worker/worker
+.claude/

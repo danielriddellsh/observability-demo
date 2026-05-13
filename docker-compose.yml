@@ -10,8 +10,9 @@ services:
       - GF_AUTH_ANONYMOUS_ENABLED=true
       - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
       - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor exemplars
     volumes:
-      # Pre-provisioned dashboard and datasources — visible immediately when Grafana opens.
+      # Pre-provisioned dashboards and datasources — visible when Grafana opens.
       - ./grafana/dashboards:/var/lib/grafana/dashboards
       - ./grafana/provisioning/dashboards:/etc/grafana/provisioning/dashboards
       - ./grafana/provisioning/datasources:/etc/grafana/provisioning/datasources
@@ -25,6 +26,10 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-lgtm:4317
       - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
       - OTEL_SERVICE_NAME=worker
+      - SERVICE_VERSION=v1.4.2
+      - DEPLOYMENT_ENV=production
+      - CLOUD_REGION=eu-west-1
+      - K8S_CLUSTER=prod-eu-1
       - PORT=9090
 
   api:
@@ -37,6 +42,10 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-lgtm:4317
       - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
       - OTEL_SERVICE_NAME=api
+      - SERVICE_VERSION=v1.4.2
+      - DEPLOYMENT_ENV=production
+      - CLOUD_REGION=eu-west-1
+      - K8S_CLUSTER=prod-eu-1
       - PORT=8080
       - WORKER_URL=http://worker:9090
     ports:
@@ -51,4 +60,7 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-lgtm:4317
       - OTEL_EXPORTER_OTLP_PROTOCOL=grpc
       - OTEL_SERVICE_NAME=loadgen
+      - SERVICE_VERSION=v1.4.2
+      - DEPLOYMENT_ENV=production
+      - CLOUD_REGION=eu-west-1
       - TARGET=http://api:8080
