@@ -1,0 +1,338 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"math/rand"
+	"net/http"
+	"os"
+	"os/signal"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"go.opentelemetry.io/contrib/bridges/otelslog"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/log/global"
+	"go.opentelemetry.io/otel/metric"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	"go.opentelemetry.io/otel/trace"
+)
+
+const serviceName = "worker"
+
+var (
+	tracer      = otel.Tracer(serviceName)
+	dbDuration  metric.Float64Histogram
+	dbErrors    metric.Int64Counter
+	activeCalls atomic.Int32 // in-flight /process requests
+)
+
+type traceContextHandler struct{ slog.Handler }
+
+func (h traceContextHandler) Handle(ctx context.Context, r slog.Record) error {
+	if sc := trace.SpanContextFromContext(ctx); sc.IsValid() {
+		r.AddAttrs(
+			slog.String("trace_id", sc.TraceID().String()),
+			slog.String("span_id", sc.SpanID().String()),
+		)
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+type fanoutHandler []slog.Handler
+
+func (f fanoutHandler) Enabled(ctx context.Context, l slog.Level) bool {
+	for _, h := range f {
+		if h.Enabled(ctx, l) {
+			return true
+		}
+	}
+	return false
+}
+func (f fanoutHandler) Handle(ctx context.Context, r slog.Record) error {
+	for _, h := range f {
+		_ = h.Handle(ctx, r.Clone())
+	}
+	return nil
+}
+func (f fanoutHandler) WithAttrs(as []slog.Attr) slog.Handler {
+	out := make(fanoutHandler, len(f))
+	for i, h := range f {
+		out[i] = h.WithAttrs(as)
+	}
+	return out
+}
+func (f fanoutHandler) WithGroup(name string) slog.Handler {
+	out := make(fanoutHandler, len(f))
+	for i, h := range f {
+		out[i] = h.WithGroup(name)
+	}
+	return out
+}
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	shutdown, err := setupOTel(ctx)
+	if err != nil {
+		slog.Error("otel setup failed", "err", err)
+		os.Exit(1)
+	}
+	defer shutdown(context.Background())
+
+	otlpHandler := otelslog.NewHandler(serviceName)
+	stdoutHandler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})
+	logger := slog.New(traceContextHandler{fanoutHandler{otlpHandler, stdoutHandler}})
+	slog.SetDefault(logger)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintln(w, "ok")
+	})
+	mux.HandleFunc("GET /process", processHandler)
+
+	handler := otelhttp.NewHandler(mux, "http.server",
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
+			return r.Method + " " + r.URL.Path
+		}),
+	)
+
+	port := getenv("PORT", "9090")
+	srv := &http.Server{Addr: ":" + port, Handler: handler, ReadHeaderTimeout: 5 * time.Second}
+
+	go func() {
+		logger.Info("worker listening", "port", port)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("server error", "err", err)
+		}
+	}()
+
+	<-ctx.Done()
+	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = srv.Shutdown(shutCtx)
+}
+
+func processHandler(w http.ResponseWriter, r *http.Request) {
+	activeCalls.Add(1)
+	defer activeCalls.Add(-1)
+	orderID := r.URL.Query().Get("id")
+	userID := r.URL.Query().Get("user")
+
+	span := trace.SpanFromContext(r.Context())
+	span.SetAttributes(
+		attribute.String("order.id", orderID),
+		attribute.String("user.id", userID),
+	)
+
+	// Log at entry so every span has at least one log line anchored to the start.
+	slog.InfoContext(r.Context(), "processing order", "order_id", orderID, "user_id", userID)
+
+	if err := cacheCheck(r.Context(), orderID); err != nil {
+		slog.ErrorContext(r.Context(), "cache check failed", "order_id", orderID, "err", err)
+		span.SetStatus(codes.Error, err.Error())
+		http.Error(w, "cache error", http.StatusInternalServerError)
+		return
+	}
+
+	if err := dbLookup(r.Context(), orderID, userID); err != nil {
+		slog.ErrorContext(r.Context(), "db lookup failed", "order_id", orderID, "err", err)
+		span.SetStatus(codes.Error, err.Error())
+		http.Error(w, "db error", http.StatusInternalServerError)
+		return
+	}
+
+	if err := compute(r.Context(), orderID); err != nil {
+		slog.ErrorContext(r.Context(), "compute failed", "order_id", orderID, "err", err)
+		span.SetStatus(codes.Error, err.Error())
+		http.Error(w, "compute error", http.StatusInternalServerError)
+		return
+	}
+
+	slog.InfoContext(r.Context(), "order processed", "order_id", orderID, "user_id", userID)
+	fmt.Fprintf(w, `{"order_id":%q,"status":"ok"}`, orderID)
+}
+
+func cacheCheck(ctx context.Context, orderID string) error {
+	_, span := tracer.Start(ctx, "cache.check",
+		trace.WithAttributes(
+			attribute.String("cache.backend", "redis"),
+			attribute.String("order.id", orderID),
+		),
+	)
+	defer span.End()
+	time.Sleep(time.Duration(3+rand.Intn(7)) * time.Millisecond)
+	span.SetAttributes(attribute.Bool("cache.hit", true))
+	return nil
+}
+
+// dbLookup simulates a real-world database call whose behaviour degrades
+// under load — mirroring queuing theory (Little's Law):
+//
+//   - Base rates: ~77% fast, ~15% slow query, ~8% error
+//   - Each extra concurrent request above 3 adds ~40 ms of queuing latency
+//     and nudges the error probability up by 2 % (DB connection pool pressure)
+func dbLookup(ctx context.Context, orderID, userID string) error {
+	concurrency := int(activeCalls.Load())
+
+	ctx, span := tracer.Start(ctx, "db.lookup",
+		trace.WithAttributes(
+			attribute.String("db.system", "postgresql"),
+			attribute.String("db.name", "orders"),
+			attribute.String("db.operation", "SELECT"),
+			attribute.String("order.id", orderID),
+			attribute.String("user.id", userID),
+			attribute.Int("db.concurrency", concurrency),
+		),
+	)
+	defer span.End()
+
+	start := time.Now()
+
+	// Queuing overhead: starts once concurrency exceeds the simulated pool size (3).
+	queueDepth := max(0, concurrency-3)
+	queueLatency := time.Duration(queueDepth*40) * time.Millisecond
+
+	// Error probability rises with load (connection pool exhaustion).
+	errorProb := 0.08 + float64(queueDepth)*0.02
+	slowProb := 0.15
+
+	r := rand.Float64()
+	var err error
+
+	switch {
+	case r < errorProb:
+		time.Sleep(queueLatency + time.Duration(10+rand.Intn(20))*time.Millisecond)
+		err = errors.New("db: connection refused")
+		span.SetStatus(codes.Error, err.Error())
+		span.AddEvent("exception", trace.WithAttributes(
+			attribute.String("exception.type", "DatabaseConnectionError"),
+			attribute.String("exception.message", err.Error()),
+		))
+		dbErrors.Add(ctx, 1)
+
+	case r < errorProb+slowProb:
+		d := queueLatency + time.Duration(500+rand.Intn(1000))*time.Millisecond
+		time.Sleep(d)
+		span.AddEvent("db.slow_query", trace.WithAttributes(
+			attribute.Int64("threshold_ms", 200),
+			attribute.Int64("actual_ms", d.Milliseconds()),
+			attribute.Int("queue_depth", queueDepth),
+		))
+		slog.WarnContext(ctx, "slow db query",
+			"order_id", orderID,
+			"duration_ms", d.Milliseconds(),
+			"queue_depth", queueDepth,
+		)
+
+	default:
+		time.Sleep(queueLatency + time.Duration(10+rand.Intn(40))*time.Millisecond)
+	}
+
+	dbDuration.Record(ctx, time.Since(start).Seconds())
+	return err
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func compute(ctx context.Context, orderID string) error {
+	_, span := tracer.Start(ctx, "compute",
+		trace.WithAttributes(attribute.String("order.id", orderID)),
+	)
+	defer span.End()
+	time.Sleep(time.Duration(5+rand.Intn(15)) * time.Millisecond)
+	return nil
+}
+
+func setupOTel(ctx context.Context) (func(context.Context) error, error) {
+	res, err := resource.New(ctx,
+		resource.WithAttributes(semconv.ServiceName(getenv("OTEL_SERVICE_NAME", serviceName))),
+		resource.WithFromEnv(),
+		resource.WithProcess(),
+		resource.WithHost(),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	traceExp, err := otlptracegrpc.New(ctx, otlptracegrpc.WithInsecure())
+	if err != nil {
+		return nil, fmt.Errorf("trace exporter: %w", err)
+	}
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithBatcher(traceExp),
+		sdktrace.WithResource(res),
+	)
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
+
+	logExp, err := otlploggrpc.New(ctx, otlploggrpc.WithInsecure())
+	if err != nil {
+		return nil, fmt.Errorf("log exporter: %w", err)
+	}
+	lp := sdklog.NewLoggerProvider(
+		sdklog.WithProcessor(sdklog.NewBatchProcessor(logExp)),
+		sdklog.WithResource(res),
+	)
+	global.SetLoggerProvider(lp)
+
+	metricExp, err := otlpmetricgrpc.New(ctx, otlpmetricgrpc.WithInsecure())
+	if err != nil {
+		return nil, fmt.Errorf("metric exporter: %w", err)
+	}
+	mp := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExp, sdkmetric.WithInterval(10*time.Second))),
+		sdkmetric.WithResource(res),
+	)
+	otel.SetMeterProvider(mp)
+
+	meter := mp.Meter(serviceName)
+	dbDuration, err = meter.Float64Histogram("worker_db_duration_seconds",
+		metric.WithDescription("db.lookup duration in seconds"),
+		metric.WithUnit("s"))
+	if err != nil {
+		return nil, err
+	}
+	dbErrors, err = meter.Int64Counter("worker_db_errors_total",
+		metric.WithDescription("Total db.lookup errors"))
+	if err != nil {
+		return nil, err
+	}
+
+	return func(ctx context.Context) error {
+		_ = tp.Shutdown(ctx)
+		_ = mp.Shutdown(ctx)
+		_ = lp.Shutdown(ctx)
+		return nil
+	}, nil
+}
+
+func getenv(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
